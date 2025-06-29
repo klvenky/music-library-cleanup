@@ -231,32 +231,32 @@ cd music-metadata-fixer
 make install
 ```
 
-## Advanced Usage
+## Direct Usage
 
-### Direct Python Script Usage
-
-If you prefer to use the Python scripts directly:
+You can also run the script directly:
 
 ```bash
-# File renaming
-python3 music_renamer.py /path/to/music --dry-run --verbose
+# Preview changes
+python3 music_metadata_fixer.py /path/to/music --dry-run --verbose
 
-# Metadata cleaning only
-python3 music_renamer.py /path/to/music --metadata-only --dry-run --verbose
+# Clean metadata only
+python3 music_metadata_fixer.py /path/to/music --metadata-only --dry-run --verbose
 
-# Album organization
-python3 album_mapper.py /path/to/music --dry-run --verbose
+# Organize albums
+python3 music_metadata_fixer.py /path/to/music --albums-only --dry-run --verbose
 ```
 
-### Command Line Options
+## Script Details
 
-#### music_renamer.py
+#### music_metadata_fixer.py
+
 - `--dry-run`: Preview changes without making them
 - `--verbose`: Enable detailed logging
 - `--metadata-only`: Only clean metadata, skip filename cleaning
 - `--filename-only`: Only clean filenames, skip metadata cleaning
 
 #### album_mapper.py
+
 - `--dry-run`: Preview changes without making them
 - `--verbose`: Enable detailed logging
 - `--remove-empty`: Remove empty "singles" folders after moving files

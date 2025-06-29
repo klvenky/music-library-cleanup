@@ -50,7 +50,7 @@ rename:
 		exit 1; \
 	fi
 	@echo "Renaming music files in $(DIRECTORY)..."
-	python3 music_renamer.py "$(DIRECTORY)" --verbose
+	python3 music_metadata_fixer.py "$(DIRECTORY)" --verbose
 
 rename-dry-run:
 	@if [ -z "$(DIRECTORY)" ]; then \
@@ -58,7 +58,7 @@ rename-dry-run:
 		exit 1; \
 	fi
 	@echo "Previewing file renaming in $(DIRECTORY)..."
-	python3 music_renamer.py "$(DIRECTORY)" --dry-run --verbose
+	python3 music_metadata_fixer.py "$(DIRECTORY)" --dry-run --verbose
 
 # Metadata cleaning operations
 metadata:
@@ -67,7 +67,7 @@ metadata:
 		exit 1; \
 	fi
 	@echo "Cleaning metadata in $(DIRECTORY)..."
-	python3 music_renamer.py "$(DIRECTORY)" --metadata-only --verbose
+	python3 music_metadata_fixer.py "$(DIRECTORY)" --metadata-only --verbose
 
 metadata-dry-run:
 	@if [ -z "$(DIRECTORY)" ]; then \
@@ -75,7 +75,7 @@ metadata-dry-run:
 		exit 1; \
 	fi
 	@echo "Previewing metadata cleaning in $(DIRECTORY)..."
-	python3 music_renamer.py "$(DIRECTORY)" --metadata-only --dry-run --verbose
+	python3 music_metadata_fixer.py "$(DIRECTORY)" --metadata-only --dry-run --verbose
 
 # Album organization operations
 albums:
@@ -84,7 +84,7 @@ albums:
 		exit 1; \
 	fi
 	@echo "Organizing albums in $(DIRECTORY)..."
-	python3 album_mapper.py "$(DIRECTORY)" --verbose
+	python3 music_metadata_fixer.py "$(DIRECTORY)" --albums-only --verbose
 
 albums-dry-run:
 	@if [ -z "$(DIRECTORY)" ]; then \
@@ -92,7 +92,7 @@ albums-dry-run:
 		exit 1; \
 	fi
 	@echo "Previewing album organization in $(DIRECTORY)..."
-	python3 album_mapper.py "$(DIRECTORY)" --dry-run --verbose
+	python3 music_metadata_fixer.py "$(DIRECTORY)" --albums-only --dry-run --verbose
 
 # Combined operations
 all:
@@ -102,11 +102,11 @@ all:
 	fi
 	@echo "Running all operations in $(DIRECTORY)..."
 	@echo "Step 1: Renaming files..."
-	python3 music_renamer.py "$(DIRECTORY)" --verbose
+	python3 music_metadata_fixer.py "$(DIRECTORY)" --verbose
 	@echo "Step 2: Cleaning metadata..."
-	python3 music_renamer.py "$(DIRECTORY)" --metadata-only --verbose
+	python3 music_metadata_fixer.py "$(DIRECTORY)" --metadata-only --verbose
 	@echo "Step 3: Organizing albums..."
-	python3 album_mapper.py "$(DIRECTORY)" --verbose
+	python3 music_metadata_fixer.py "$(DIRECTORY)" --albums-only --verbose
 	@echo "All operations completed!"
 
 all-dry-run:
@@ -116,11 +116,11 @@ all-dry-run:
 	fi
 	@echo "Previewing all operations in $(DIRECTORY)..."
 	@echo "Step 1: Previewing file renaming..."
-	python3 music_renamer.py "$(DIRECTORY)" --dry-run --verbose
+	python3 music_metadata_fixer.py "$(DIRECTORY)" --dry-run --verbose
 	@echo "Step 2: Previewing metadata cleaning..."
-	python3 music_renamer.py "$(DIRECTORY)" --metadata-only --dry-run --verbose
+	python3 music_metadata_fixer.py "$(DIRECTORY)" --metadata-only --dry-run --verbose
 	@echo "Step 3: Previewing album organization..."
-	python3 album_mapper.py "$(DIRECTORY)" --dry-run --verbose
+	python3 music_metadata_fixer.py "$(DIRECTORY)" --albums-only --dry-run --verbose
 	@echo "All preview operations completed!"
 
 # Utility operations
@@ -140,9 +140,9 @@ test:
 test-run:
 	@echo "Running tests on test_music directory..."
 	@echo "Testing file renaming..."
-	python3 music_renamer.py test_music --dry-run --verbose --no-output
+	python3 music_metadata_fixer.py test_music --dry-run --verbose --no-output
 	@echo "Testing metadata cleaning..."
-	python3 music_renamer.py test_music --metadata-only --dry-run --verbose --no-output
+	python3 music_metadata_fixer.py test_music --metadata-only --dry-run --verbose --no-output
 	@echo "Testing album organization..."
-	python3 album_mapper.py test_music --dry-run --verbose --no-output
+	python3 music_metadata_fixer.py test_music --albums-only --dry-run --verbose --no-output
 	@echo "All tests completed!" 
