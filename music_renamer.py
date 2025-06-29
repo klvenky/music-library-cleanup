@@ -10,6 +10,7 @@ This script recursively processes music files in a directory and cleans up their
 5. Normalizing multiple spaces and whitespace characters throughout the filename
 6. Normalizing unicode characters and removing invalid filename characters
 
+The script runs recursively until no more patterns are found to replace, ensuring complete cleaning.
 The script also cleans up music metadata (ID3 tags) with the same rules.
 
 Usage:
@@ -23,6 +24,7 @@ import logging
 from pathlib import Path
 from typing import List, Tuple, Optional
 import unicodedata
+from datetime import datetime
 
 try:
     from mutagen import File
@@ -36,12 +38,15 @@ try:
 except ImportError:
     MUTAGEN_AVAILABLE = False
 
+# Ensure outputs directory exists before configuring logging
+os.makedirs('outputs', exist_ok=True)
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('music_renamer.log'),
+        logging.FileHandler('outputs/music_renamer.log'),
         logging.StreamHandler()
     ]
 )
@@ -56,11 +61,13 @@ MUSIC_EXTENSIONS = {
 class MusicRenamer:
     """Handles the renaming of music files with various cleanup operations."""
     
-    def __init__(self, dry_run: bool = False, verbose: bool = False, metadata_only: bool = False, filename_only: bool = False):
+    def __init__(self, dry_run: bool = False, verbose: bool = False, metadata_only: bool = False, filename_only: bool = False, debug: bool = False, no_output: bool = False):
         self.dry_run = dry_run
         self.verbose = verbose
         self.metadata_only = metadata_only
         self.filename_only = filename_only
+        self.debug = debug
+        self.no_output = no_output
         self.stats = {
             'processed': 0,
             'renamed': 0,
@@ -69,10 +76,23 @@ class MusicRenamer:
             'skipped': 0
         }
         
+        # Track unique URLs that are replaced
+        self.replaced_urls = set()
+        
+        # Track original and final filenames for markdown table
+        self.filename_changes = []
+        
+        # Track error details for reporting
+        self.error_details = []
+        
         # Compile regex patterns for better performance
         self.leading_numbers_pattern = re.compile(r'^[\d\s\-_\.]+|^\[[^\]]*\][\s\-_\.]*')
-        self.website_pattern = re.compile(r'[-_\s]*(?:www\.|https?://)?[a-zA-Z0-9\-\.]+\.[a-zA-Z]{2,}[-_\s]*', re.IGNORECASE)
-        self.multiple_spaces_pattern = re.compile(r'\s+')
+        # Match only the domain if preceded by a separator or start, and followed by a separator, dot, or end
+        self.website_pattern = re.compile(r'(?:www\.|https?://)?[a-zA-Z0-9\-]+\.(?:com|co|in|net|ws|io)', re.IGNORECASE)
+        self.trailing_separator_pattern = re.compile(r'[-_\s]+$')
+        self.bitrate_pattern = re.compile(r'[-_\s]*(?:320|256|192|160|128|96|64)[-_\s]*k\s*b\s*p\s*s?[-_\s]*', re.IGNORECASE)
+        self.repeated_extension_pattern = re.compile(r'\.(mp3|flac|wav|aac|ogg|m4a|wma|opus|alac|aiff|dsd|dff|dsf)\.(mp3|flac|wav|aac|ogg|m4a|wma|opus|alac|aiff|dsd|dff|dsf)$', re.IGNORECASE)
+        self.multiple_spaces_pattern = re.compile(r'\s')
         self.trailing_spaces_pattern = re.compile(r'\s+$')
         self.trailing_brackets_pattern = re.compile(r'[\s\-_\.]*\[[^\]]*\]$')
         self.leading_spaces_pattern = re.compile(r'^\s+')
@@ -84,47 +104,61 @@ class MusicRenamer:
     
     def clean_filename(self, filename: str) -> str:
         """
-        Clean the filename by applying various transformations.
-        
-        Args:
-            filename: Original filename (without path)
-            
-        Returns:
-            Cleaned filename
+        Clean the filename by applying various transformations, but preserve [w+].ft and ft.[w+] patterns.
         """
-        # Split filename and extension
+        # Step 0: Remove repeated file extensions (e.g., .mp3.mp3 -> .mp3)
+        filename = self.repeated_extension_pattern.sub(r'.\1', filename)
         name, ext = os.path.splitext(filename)
-        
+
+        # Preserve [w+].ft and ft.[w+] patterns
+        preserved = []
+        def preserve_ft(match):
+            preserved.append(match.group(0))
+            return f"__FTPRESERVE{len(preserved)-1}__"
+        # Regex for [w+].ft or ft.[w+]
+        ft_pattern = re.compile(r'(\[[^\]]+\]\.ft|ft\.\[[^\]]+\])', re.IGNORECASE)
+        name = ft_pattern.sub(preserve_ft, name)
+
         # Step 1: Remove leading numbers, dashes, underscores, dots, spaces, and square brackets
         name = self.leading_numbers_pattern.sub('', name)
-        
-        # Step 2: Remove website details (URLs, domain names)
-        name = self.website_pattern.sub('', name)
-        
-        # Step 3: Remove trailing square brackets and their content
+        # Step 2: Remove website details (URLs, domain names) and track them
+        original_name = name
+        parts = re.split(r'([\-_ ])', name)
+        filtered_parts = []
+        for part in parts:
+            if self.website_pattern.fullmatch(part):
+                cleaned_url = part.strip('-_ ')
+                if cleaned_url:
+                    self.replaced_urls.add(cleaned_url)
+                continue
+            filtered_parts.append(part)
+        name = ''.join(filtered_parts)
+        name = self.trailing_separator_pattern.sub('', name)
+        # Step 3: Remove bitrate information
+        name = self.bitrate_pattern.sub('', name)
+        # Step 4: Remove trailing square brackets and their content
         name = self.trailing_brackets_pattern.sub('', name)
-        
-        # Step 4: Remove any remaining empty brackets
+        # Step 5: Remove any remaining empty brackets
         name = self.empty_brackets_pattern.sub('', name)
-        
-        # Step 5: Normalize all whitespace characters to single spaces
+        # Step 6: Normalize all whitespace characters to single spaces
         name = self.multiple_spaces_pattern.sub(' ', name)
-        
-        # Step 6: Remove leading and trailing spaces
+        # Step 7: Remove leading and trailing spaces
         name = name.strip()
-        
-        # Step 7: Normalize unicode characters
+        # Step 8: Normalize unicode characters
         name = unicodedata.normalize('NFKC', name)
-        
-        # Step 8: Replace invalid filename characters
+        # Step 9: Replace invalid filename characters
         invalid_chars = '<>:"/\\|?*'
         for char in invalid_chars:
             name = name.replace(char, '')
-        
-        # If the name is empty after cleaning, use a default name
+        # FINAL: Remove leading numbers, dashes, underscores, dots, spaces, and square brackets again
+        name = self.leading_numbers_pattern.sub('', name)
+        # Restore preserved ft patterns
+        def restore_ft(m):
+            idx = int(m.group(1))
+            return preserved[idx]
+        name = re.sub(r'__FTPRESERVE(\d+)__', restore_ft, name)
         if not name:
             name = "Unknown Track"
-        
         return name + ext
     
     def process_file(self, file_path: Path) -> Tuple[bool, str]:
@@ -161,6 +195,13 @@ class MusicRenamer:
                             new_path = file_path.parent / new_name
                             counter += 1
                     
+                    # Track the filename change for markdown table
+                    self.filename_changes.append({
+                        'original': original_name,
+                        'final': new_path.name,
+                        'path': str(file_path.parent)
+                    })
+                    
                     if self.dry_run:
                         logger.info(f"DRY RUN: Would rename '{original_name}' to '{new_path.name}'")
                     else:
@@ -188,11 +229,17 @@ class MusicRenamer:
         except Exception as e:
             error_msg = f"Error processing {file_path}: {str(e)}"
             logger.error(error_msg)
+            # Track error details for reporting
+            self.error_details.append({
+                'filename': file_path.name,
+                'path': str(file_path.parent),
+                'error': str(e)
+            })
             return False, error_msg
     
     def process_directory(self, directory_path: Path) -> None:
         """
-        Recursively process all music files in the directory.
+        Recursively process all music files in the directory until no more changes are needed.
         
         Args:
             directory_path: Path to the directory to process
@@ -207,29 +254,98 @@ class MusicRenamer:
         
         logger.info(f"Processing directory: {directory_path}")
         
-        # Walk through all files recursively
-        for root, dirs, files in os.walk(directory_path):
-            root_path = Path(root)
+        # Track total changes across all passes
+        total_passes = 0
+        total_changes = 0
+        
+        # For dry-run mode, track virtual file states
+        virtual_files = {}
+        
+        while True:
+            pass_number = total_passes + 1
+            logger.info(f"Starting pass {pass_number}...")
             
-            for file_name in files:
-                file_path = root_path / file_name
-                self.stats['processed'] += 1
+            # Reset stats for this pass
+            pass_stats = {
+                'processed': 0,
+                'renamed': 0,
+                'metadata_updated': 0,
+                'errors': 0,
+                'skipped': 0
+            }
+            
+            changes_in_pass = 0
+            
+            # Walk through all files recursively
+            for root, dirs, files in os.walk(directory_path):
+                root_path = Path(root)
                 
-                success, result = self.process_file(file_path)
-                
-                if success:
-                    if result != "No changes needed":
-                        if "filename:" in result:
-                            self.stats['renamed'] += 1
-                        if "Metadata updated" in result:
-                            self.stats['metadata_updated'] += 1
+                for file_name in files:
+                    file_path = root_path / file_name
+                    pass_stats['processed'] += 1
+                    
+                    # In dry-run mode, use virtual file path if it exists
+                    if self.dry_run and str(file_path) in virtual_files:
+                        virtual_name = virtual_files[str(file_path)]
+                        # Create a virtual file path for processing
+                        virtual_path = file_path.parent / virtual_name
+                        success, result = self.process_file(virtual_path)
                     else:
-                        self.stats['skipped'] += 1
-                else:
-                    self.stats['errors'] += 1
-                
+                        success, result = self.process_file(file_path)
+                    
+                    if success:
+                        if result != "No changes needed":
+                            if "filename:" in result:
+                                pass_stats['renamed'] += 1
+                                changes_in_pass += 1
+                                
+                                # In dry-run mode, update virtual file state
+                                if self.dry_run:
+                                    # Extract the new name from the result
+                                    import re
+                                    match = re.search(r"filename: '.*?' → '(.+?)'", result)
+                                    if match:
+                                        new_name = match.group(1)
+                                        virtual_files[str(file_path)] = new_name
+                            if "Metadata updated" in result:
+                                pass_stats['metadata_updated'] += 1
+                                changes_in_pass += 1
+                        else:
+                            pass_stats['skipped'] += 1
+                    else:
+                        pass_stats['errors'] += 1
+                    
+                    if self.debug:
+                        logger.debug(f"Processed: {file_path} - {result}")
+            
+            # Update total stats
+            self.stats['processed'] += pass_stats['processed']
+            self.stats['renamed'] += pass_stats['renamed']
+            self.stats['metadata_updated'] += pass_stats['metadata_updated']
+            self.stats['errors'] += pass_stats['errors']
+            self.stats['skipped'] += pass_stats['skipped']
+            
+            total_changes += changes_in_pass
+            total_passes += 1
+            
+            # Log pass results
+            if changes_in_pass > 0:
+                logger.info(f"Pass {pass_number} completed: {changes_in_pass} changes made")
                 if self.verbose:
-                    logger.debug(f"Processed: {file_path} - {result}")
+                    logger.info(f"  - Files renamed: {pass_stats['renamed']}")
+                    logger.info(f"  - Metadata updated: {pass_stats['metadata_updated']}")
+                    logger.info(f"  - Files skipped: {pass_stats['skipped']}")
+                    logger.info(f"  - Errors: {pass_stats['errors']}")
+            else:
+                logger.info(f"Pass {pass_number} completed: No changes needed")
+                break
+            
+            # Safety check to prevent infinite loops
+            if total_passes > 10:
+                logger.warning(f"Reached maximum number of passes ({total_passes}). Stopping to prevent infinite loop.")
+                break
+        
+        logger.info(f"Processing completed after {total_passes} passes with {total_changes} total changes")
     
     def print_stats(self) -> None:
         """Print processing statistics."""
@@ -242,44 +358,148 @@ class MusicRenamer:
         logger.info(f"Files skipped (no changes): {self.stats['skipped']}")
         logger.info(f"Errors encountered: {self.stats['errors']}")
         
+        # Display unique URLs that were replaced
+        if self.replaced_urls:
+            logger.info("=" * 50)
+            logger.info("UNIQUE URLS REPLACED")
+            logger.info("=" * 50)
+            for url in sorted(self.replaced_urls):
+                logger.info(f"  - {url}")
+            logger.info(f"Total unique URLs replaced: {len(self.replaced_urls)}")
+            
+            # Write URLs to file
+            self.write_urls_to_file()
+        
         if self.dry_run:
             logger.info("DRY RUN MODE - No files were actually renamed or modified")
-
+        
+        logger.info("=" * 50)
+    
+    def write_urls_to_file(self, album_results=None) -> None:
+        """Write the unique URLs, filename changes, and optionally album results to a markdown file with collapsible sections."""
+        if self.no_output:
+            return
+            
+        if not self.replaced_urls and not self.filename_changes and not album_results and not self.error_details:
+            return
+            
+        try:
+            # Create outputs directory if it doesn't exist
+            outputs_dir = Path("outputs")
+            outputs_dir.mkdir(exist_ok=True)
+            
+            # Remove previous replaced_urls_*.md files
+            for old_file in outputs_dir.glob('replaced_urls.md'):
+                try:
+                    old_file.unlink()
+                except Exception:
+                    pass
+            
+            timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            filename = outputs_dir / f"replaced_urls.md"
+            
+            with open(filename, 'w', encoding='utf-8') as f:
+                f.write(f"# Music File Processing Report - {timestamp}\n\n")
+                f.write("Generated by music_renamer.py\n\n")
+                
+                # Albums Created Section
+                if album_results:
+                    f.write("## Albums Created\n\n")
+                    f.write(f"Total albums created: **{len(album_results)}**\n\n")
+                    f.write("| Album Folder |\n")
+                    f.write("|--------------|\n")
+                    for album in album_results:
+                        f.write(f"| `{album}` |\n")
+                    f.write("\n")
+                
+                # Filename Changes Section
+                if self.filename_changes:
+                    f.write("## Filename Changes\n\n")
+                    f.write(f"Total files renamed: **{len(self.filename_changes)}**\n\n")
+                    f.write("| Original Filename | Final Filename | Directory |\n")
+                    f.write("|-------------------|----------------|-----------|\n")
+                    for change in self.filename_changes:
+                        # Escape pipe characters in filenames for markdown table
+                        original = change['original'].replace('|', '\\|')
+                        final = change['final'].replace('|', '\\|')
+                        path = change['path'].replace('|', '\\|')
+                        f.write(f"| `{original}` | `{final}` | `{path}` |\n")
+                    f.write("\n")
+                
+                # URLs Section
+                if self.replaced_urls:
+                    f.write("## URLs Replaced\n\n")
+                    f.write(f"Total unique URLs replaced: **{len(self.replaced_urls)}**\n\n")
+                    f.write("| URL |\n")
+                    f.write("|-----|\n")
+                    for url in sorted(self.replaced_urls):
+                        f.write(f"| {url} |\n")
+                    f.write("\n")
+                
+                # Error Details Section
+                if self.error_details:
+                    f.write("## Error Details\n\n")
+                    f.write(f"Total errors encountered: **{len(self.error_details)}**\n\n")
+                    f.write("| Filename | Error |\n")
+                    f.write("|----------|-------|\n")
+                    for error in self.error_details:
+                        # Escape pipe characters for markdown table
+                        filename = error['filename'].replace('|', '\\|')
+                        error_msg = error['error'].replace('|', '\\|')
+                        f.write(f"| `{filename}` | {error_msg} |\n")
+                    f.write("\n")
+                
+                # Write summary
+                f.write("## Summary\n\n")
+                f.write(f"- **Total Files Processed**: {self.stats['processed']}\n")
+                f.write(f"- **Processing Date**: {timestamp}\n")
+                f.write(f"- **Files Renamed**: {self.stats['renamed']}\n")
+                f.write(f"- **Metadata Updated**: {self.stats['metadata_updated']}\n")
+                f.write(f"- **Files Skipped**: {self.stats['skipped']}\n")
+                f.write(f"- **Errors**: {self.stats['errors']}\n")
+                if self.replaced_urls:
+                    f.write(f"- **Unique URLs Replaced**: {len(self.replaced_urls)}\n")
+                if album_results:
+                    f.write(f"- **Albums Created**: {len(album_results)}\n")
+                if self.dry_run:
+                    f.write("\n> **Note**: This was a dry run - no files were actually modified.\n")
+            
+            logger.info(f"Report written to: {filename}")
+            
+        except Exception as e:
+            logger.error(f"Error writing report to file: {str(e)}")
+    
     def clean_text(self, text: str) -> str:
         """
-        Clean text using the same rules as filename cleaning.
-        
-        Args:
-            text: Text to clean
-            
-        Returns:
-            Cleaned text
+        Clean text using the same rules as filename cleaning, but preserve [w+].ft and ft.[w+] patterns.
         """
         if not text:
             return text
-            
-        # Apply the same cleaning rules as filenames
-        # Step 1: Remove leading numbers, dashes, underscores, dots, spaces, and square brackets
+        preserved = []
+        def preserve_ft(match):
+            preserved.append(match.group(0))
+            return f"__FTPRESERVE{len(preserved)-1}__"
+        ft_pattern = re.compile(r'(\[[^\]]+\]\.ft|ft\.\[[^\]]+\])', re.IGNORECASE)
+        text = ft_pattern.sub(preserve_ft, text)
         text = self.leading_numbers_pattern.sub('', text)
-        
-        # Step 2: Remove website details (URLs, domain names)
+        original_text = text
         text = self.website_pattern.sub('', text)
-        
-        # Step 3: Remove trailing square brackets and their content
+        if text != original_text:
+            matches = self.website_pattern.findall(original_text)
+            for match in matches:
+                cleaned_url = match.strip('-_ ')
+                if cleaned_url:
+                    self.replaced_urls.add(cleaned_url)
+        text = self.bitrate_pattern.sub('', text)
         text = self.trailing_brackets_pattern.sub('', text)
-        
-        # Step 4: Remove any remaining empty brackets
         text = self.empty_brackets_pattern.sub('', text)
-        
-        # Step 5: Normalize all whitespace characters to single spaces
         text = self.multiple_spaces_pattern.sub(' ', text)
-        
-        # Step 6: Remove leading and trailing spaces
         text = text.strip()
-        
-        # Step 7: Normalize unicode characters
         text = unicodedata.normalize('NFKC', text)
-        
+        def restore_ft(m):
+            idx = int(m.group(1))
+            return preserved[idx]
+        text = re.sub(r'__FTPRESERVE(\d+)__', restore_ft, text)
         return text
     
     def clean_metadata(self, file_path: Path) -> Tuple[bool, str]:
@@ -334,7 +554,6 @@ class MusicRenamer:
     def _clean_id3_tags(self, tags, changes_log: List[str]) -> Tuple[bool, List[str]]:
         """Clean ID3 tags (MP3 files)."""
         changes_made = False
-        
         # Clean title
         if 'TIT2' in tags:
             original_title = str(tags['TIT2'])
@@ -344,7 +563,6 @@ class MusicRenamer:
                     tags['TIT2'] = TIT2(encoding=3, text=cleaned_title)
                 changes_log.append(f"title: '{original_title}' → '{cleaned_title}'")
                 changes_made = True
-        
         # Clean artist
         if 'TPE1' in tags:
             original_artist = str(tags['TPE1'])
@@ -354,7 +572,6 @@ class MusicRenamer:
                     tags['TPE1'] = TPE1(encoding=3, text=cleaned_artist)
                 changes_log.append(f"artist: '{original_artist}' → '{cleaned_artist}'")
                 changes_made = True
-        
         # Clean album
         if 'TALB' in tags:
             original_album = str(tags['TALB'])
@@ -364,13 +581,12 @@ class MusicRenamer:
                     tags['TALB'] = TALB(encoding=3, text=cleaned_album)
                 changes_log.append(f"album: '{original_album}' → '{cleaned_album}'")
                 changes_made = True
-        
+        # Do NOT clean composer or other fields
         return changes_made, changes_log
     
     def _clean_vorbis_tags(self, tags, changes_log: List[str]) -> Tuple[bool, List[str]]:
         """Clean Vorbis comments (FLAC, OGG files)."""
         changes_made = False
-        
         # Clean title
         if 'title' in tags:
             original_title = tags['title'][0]
@@ -380,7 +596,6 @@ class MusicRenamer:
                     tags['title'] = [cleaned_title]
                 changes_log.append(f"title: '{original_title}' → '{cleaned_title}'")
                 changes_made = True
-        
         # Clean artist
         if 'artist' in tags:
             original_artist = tags['artist'][0]
@@ -390,7 +605,6 @@ class MusicRenamer:
                     tags['artist'] = [cleaned_artist]
                 changes_log.append(f"artist: '{original_artist}' → '{cleaned_artist}'")
                 changes_made = True
-        
         # Clean album
         if 'album' in tags:
             original_album = tags['album'][0]
@@ -400,13 +614,12 @@ class MusicRenamer:
                     tags['album'] = [cleaned_album]
                 changes_log.append(f"album: '{original_album}' → '{cleaned_album}'")
                 changes_made = True
-        
+        # Do NOT clean composer or other fields
         return changes_made, changes_log
     
     def _clean_asf_tags(self, tags, changes_log: List[str]) -> Tuple[bool, List[str]]:
         """Clean ASF tags (WMA files)."""
         changes_made = False
-        
         # Clean title
         if tags.getAttribute('Title'):
             original_title = tags.getAttribute('Title')[0]
@@ -416,7 +629,6 @@ class MusicRenamer:
                     tags.setAttribute('Title', [cleaned_title])
                 changes_log.append(f"title: '{original_title}' → '{cleaned_title}'")
                 changes_made = True
-        
         # Clean artist
         if tags.getAttribute('Author'):
             original_artist = tags.getAttribute('Author')[0]
@@ -426,7 +638,6 @@ class MusicRenamer:
                     tags.setAttribute('Author', [cleaned_artist])
                 changes_log.append(f"artist: '{original_artist}' → '{cleaned_artist}'")
                 changes_made = True
-        
         # Clean album
         if tags.getAttribute('WM/AlbumTitle'):
             original_album = tags.getAttribute('WM/AlbumTitle')[0]
@@ -436,13 +647,12 @@ class MusicRenamer:
                     tags.setAttribute('WM/AlbumTitle', [cleaned_album])
                 changes_log.append(f"album: '{original_album}' → '{cleaned_album}'")
                 changes_made = True
-        
+        # Do NOT clean composer or other fields
         return changes_made, changes_log
     
     def _clean_mp4_tags(self, tags, changes_log: List[str]) -> Tuple[bool, List[str]]:
         """Clean MP4 tags (M4A files)."""
         changes_made = False
-        
         # Clean title
         if '\xa9nam' in tags:
             original_title = tags['\xa9nam'][0]
@@ -452,7 +662,6 @@ class MusicRenamer:
                     tags['\xa9nam'] = [cleaned_title]
                 changes_log.append(f"title: '{original_title}' → '{cleaned_title}'")
                 changes_made = True
-        
         # Clean artist
         if '\xa9ART' in tags:
             original_artist = tags['\xa9ART'][0]
@@ -462,7 +671,6 @@ class MusicRenamer:
                     tags['\xa9ART'] = [cleaned_artist]
                 changes_log.append(f"artist: '{original_artist}' → '{cleaned_artist}'")
                 changes_made = True
-        
         # Clean album
         if '\xa9alb' in tags:
             original_album = tags['\xa9alb'][0]
@@ -472,7 +680,7 @@ class MusicRenamer:
                     tags['\xa9alb'] = [cleaned_album]
                 changes_log.append(f"album: '{original_album}' → '{cleaned_album}'")
                 changes_made = True
-        
+        # Do NOT clean composer or other fields
         return changes_made, changes_log
 
 def main():
@@ -496,7 +704,6 @@ Examples:
         default='.',
         help='Directory containing music files to process (default: current directory)'
     )
-    
     parser.add_argument(
         '--dry-run',
         action='store_true',
@@ -521,6 +728,18 @@ Examples:
         help='Only rename files, do not clean metadata tags'
     )
     
+    parser.add_argument(
+        '--debug',
+        action='store_true',
+        help='Enable debug logging (shows debug logs)'
+    )
+    
+    parser.add_argument(
+        '--no-output',
+        action='store_true',
+        help='Prevent generating output files during tests'
+    )
+    
     args = parser.parse_args()
     
     # Validate arguments
@@ -528,9 +747,13 @@ Examples:
         logger.error("Cannot use both --metadata-only and --filename-only")
         return 1
     
-    # Set logging level based on verbose flag
-    if args.verbose:
+    # Set logging level
+    if args.debug:
         logging.getLogger().setLevel(logging.DEBUG)
+    elif args.verbose:
+        logging.getLogger().setLevel(logging.INFO)
+    else:
+        logging.getLogger().setLevel(logging.WARNING)
     
     # Check if mutagen is available for metadata operations
     if not args.filename_only and not MUTAGEN_AVAILABLE:
@@ -548,7 +771,9 @@ Examples:
         dry_run=args.dry_run, 
         verbose=args.verbose, 
         metadata_only=args.metadata_only, 
-        filename_only=args.filename_only
+        filename_only=args.filename_only,
+        debug=args.debug,
+        no_output=args.no_output
     )
     
     try:
